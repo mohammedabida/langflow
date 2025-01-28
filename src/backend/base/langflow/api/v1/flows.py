@@ -5,7 +5,7 @@ import json
 import re
 import zipfile
 from datetime import datetime, timezone
-from typing import Annotated, List
+from typing import Annotated
 from uuid import UUID
 
 import orjson
@@ -20,7 +20,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from langflow.api.utils import CurrentActiveUser, DbSession, cascade_delete_flow, remove_api_keys, validate_is_component
 from langflow.api.v1.schemas import FlowListCreate
 from langflow.initial_setup.constants import STARTER_FOLDER_NAME
-from langflow.services.database.models.flow import Flow, FlowCreate, FlowRead, FlowUpdate, FlowShare
+from langflow.services.database.models.flow import Flow, FlowCreate, FlowRead, FlowUpdate
 from langflow.services.database.models.flow.model import FlowHeader
 from langflow.services.database.models.flow.utils import get_webhook_component_in_flow
 from langflow.services.database.models.folder.constants import DEFAULT_FOLDER_NAME
@@ -497,56 +497,3 @@ async def read_basic_examples(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
-
- 
-@router.post("/{flow_id}/share", status_code=201)
-async def share_flow(
-    *,
-    session: DbSession,
-    flow_id: UUID,
-    share_request: List[UUID],  # List of user IDs to share with
-    current_user: CurrentActiveUser,
-):
-    """Share a flow with other users in read-only mode."""
-    try:
-        # Verify flow ownership
-        flow = await _read_flow(
-            session=session,
-            flow_id=flow_id,
-            user_id=current_user.id,
-            settings_service=get_settings_service()
-        )
-       
-        if not flow:
-            raise HTTPException(status_code=404, detail="Flow not found")
-       
-        # Create share entries
-        shared_flows = []
-        for shared_user_id in share_request:
-            # Prevent duplicate shares
-            existing_share = (
-                await session.exec(
-                    select(FlowShare)
-                    .where(FlowShare.flow_id == flow_id)
-                    .where(FlowShare.user_id == shared_user_id)
-                )
-            ).first()
-           
-            if not existing_share:
-                flow_share = FlowShare(
-                    flow_id=flow_id,
-                    user_id=shared_user_id,
-                    is_read_only=True
-                )
-                session.add(flow_share)
-                shared_flows.append(flow_share)
-       
-        await session.commit()
-       
-        return {
-            "shared_users": [share.user_id for share in shared_flows],
-            "total_shared": len(shared_flows)
-        }
-   
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e    

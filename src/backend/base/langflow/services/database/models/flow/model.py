@@ -2,7 +2,7 @@
 
 import re
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional, List
+from typing import TYPE_CHECKING, Optional
 from uuid import UUID, uuid4
 
 import emoji
@@ -159,16 +159,6 @@ class FlowBase(SQLModel):
 
         return datetime.fromisoformat(v)
     
-    
-class FlowShare(SQLModel, table=True): 
-    id: Optional[UUID] = Field(default_factory=uuid4, primary_key=True)
-    flow_id: UUID = Field(foreign_key="flow.id")
-    user_id: UUID = Field(foreign_key="user.id")
-    is_read_only: bool = Field(default=True)
- 
-    flow: Optional["Flow"] = Relationship(back_populates="shared_with")
-    user: Optional["User"] = Relationship()
-
 
 class Flow(FlowBase, table=True):  # type: ignore[call-arg]
     id: UUID = Field(default_factory=uuid4, primary_key=True, unique=True)
@@ -183,10 +173,7 @@ class Flow(FlowBase, table=True):  # type: ignore[call-arg]
     messages: list["MessageTable"] = Relationship(back_populates="flow")
     transactions: list["TransactionTable"] = Relationship(back_populates="flow")
     vertex_builds: list["VertexBuildTable"] = Relationship(back_populates="flow")
-    shared_with: Optional[List[FlowShare]] = Relationship(
-        back_populates="flow",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
-    )
+
 
     def to_data(self):
         serialized = self.model_dump()
