@@ -315,6 +315,60 @@ async def update_flow(
     return db_flow
 
 
+@router.patch("/{flow_id}/active", response_model=FlowRead, status_code=200)
+async def update_flow_to_active(
+    *,
+    session: DbSession,
+    flow_id: UUID,
+    current_user: CurrentActiveUser,
+):
+    """Update a flow."""
+    settings_service = get_settings_service()
+    try:
+        db_flow = await _read_flow(
+            session=session,
+            flow_id=flow_id,
+            user_id=current_user.id,
+            settings_service=settings_service,
+        )
+
+        if not db_flow:
+            raise HTTPException(status_code=404, detail="Flow not found")
+
+        setattr(db_flow, "published", True)
+
+        webhook_component = get_webhook_component_in_flow(db_flow.data)
+        db_flow.webhook = webhook_component is not None
+        db_flow.updated_at = datetime.now(timezone.utc)
+
+        if db_flow.folder_id is None:
+            default_folder = (await session.exec(select(Folder).where(Folder.name == DEFAULT_FOLDER_NAME))).first()
+            if default_folder:
+                db_flow.folder_id = default_folder.id
+
+        session.add(db_flow)
+        await session.commit()
+        await session.refresh(db_flow)
+
+    except Exception as e:
+        if "UNIQUE constraint failed" in str(e):
+            # Get the name of the column that failed
+            columns = str(e).split("UNIQUE constraint failed: ")[1].split(".")[1].split("\n")[0]
+            # UNIQUE constraint failed: flow.user_id, flow.name
+            # or UNIQUE constraint failed: flow.name
+            # if the column has id in it, we want the other column
+            column = columns.split(",")[1] if "id" in columns.split(",")[0] else columns.split(",")[0]
+            raise HTTPException(
+                status_code=400, detail=f"{column.capitalize().replace('_', ' ')} must be unique"
+            ) from e
+
+        if hasattr(e, "status_code"):
+            raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return db_flow
+
+
 @router.delete("/{flow_id}", status_code=200)
 async def delete_flow(
     *,
