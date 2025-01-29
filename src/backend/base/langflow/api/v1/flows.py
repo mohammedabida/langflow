@@ -208,10 +208,14 @@ async def read_flows(
             stmt = stmt.where(Flow.is_component == True)  # noqa: E712
 
         if get_all:
-            flows = (await session.exec(stmt)).all()
+            flows=[]
+            user_flows = (await session.exec(stmt)).all()
+            for flow in user_flows:
+                flows.append(FlowRead(**flow.model_dump(),readonly=True))                
             statement = select(Flow).where( Flow.id.in_(select(FlowShare.flow_id).where(FlowShare.shared_with.like(f"%{str(current_user.id)}%"))))
             shared_flows = (await session.exec(statement)).all()
-            flows=flows+shared_flows
+            for flow in shared_flows:
+                flows.append(FlowRead(**flow.model_dump(),readonly=False))  
             flows = validate_is_component(flows)
             if components_only:
                 flows = [flow for flow in flows if flow.is_component]

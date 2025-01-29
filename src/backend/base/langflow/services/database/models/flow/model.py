@@ -201,7 +201,7 @@ class FlowRead(FlowBase):
     id: UUID
     user_id: UUID | None = Field()
     folder_id: UUID | None = Field()
-
+    readonly:bool | None   
 
 class FlowHeader(BaseModel):
     """Model representing a header for a flow - Without the data."""
@@ -216,6 +216,7 @@ class FlowHeader(BaseModel):
     endpoint_name: str | None = Field(None, description="The name of the endpoint associated with this flow")
     description: str | None = Field(None, description="A description of the flow")
     data: dict | None = Field(None, description="The data of the component, if is_component is True")
+    readonly: bool | None = Field(None, description="Indicates if the flow is in read-only mode")
 
     @field_validator("data", mode="before")
     @classmethod
