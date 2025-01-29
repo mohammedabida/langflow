@@ -497,3 +497,50 @@ async def read_basic_examples(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.patch("/{flow_id}/publish", response_model=FlowRead, status_code=200)
+async def publish_flow(
+    *,
+    session: DbSession,
+    flow_id: UUID,
+    current_user: CurrentActiveUser,
+):
+    """
+    Update the state of a flow to "published".
+    Only the owner of the flow can update the state.
+    """
+    settings_service = get_settings_service()
+    try:
+        # Fetch the flow from the database
+        db_flow = await _read_flow(
+            session=session,
+            flow_id=flow_id,
+            user_id=current_user.id,
+            settings_service=settings_service,
+        )
+
+        # Check if the flow exists
+        if not db_flow:
+            raise HTTPException(status_code=404, detail="Flow not found")
+
+        # Ensure the current user is the owner of the flow
+        if db_flow.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Only the owner can publish the flow")
+
+        # Update the flow state to "published"
+        db_flow.published = True
+        db_flow.updated_at = datetime.now(timezone.utc)
+
+        # Commit the changes to the database
+        session.add(db_flow)
+        await session.commit()
+        await session.refresh(db_flow)
+
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return db_flow
+
