@@ -28,8 +28,6 @@ from langflow.services.database.models.folder.model import Folder
 from langflow.services.deps import get_settings_service
 from langflow.services.settings.service import SettingsService
 from langflow.services.database.models.flows_share.model import FlowShare
-from sqlalchemy import  func
-
 # build router
 router = APIRouter(prefix="/flows", tags=["Flows"])
 
@@ -211,11 +209,11 @@ async def read_flows(
             flows=[]
             user_flows = (await session.exec(stmt)).all()
             for flow in user_flows:
-                flows.append(FlowRead(**flow.model_dump(),readonly=True))                
+                flows.append(FlowRead(**flow.model_dump(),readonly=False))                
             statement = select(Flow).where( Flow.id.in_(select(FlowShare.flow_id).where(FlowShare.shared_with.like(f"%{str(current_user.id)}%"))))
             shared_flows = (await session.exec(statement)).all()
             for flow in shared_flows:
-                flows.append(FlowRead(**flow.model_dump(),readonly=False))  
+                flows.append(FlowRead(**flow.model_dump(),readonly=True))  
             flows = validate_is_component(flows)
             if components_only:
                 flows = [flow for flow in flows if flow.is_component]
