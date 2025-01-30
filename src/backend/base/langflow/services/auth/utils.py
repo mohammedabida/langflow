@@ -5,20 +5,27 @@ from collections.abc import Coroutine
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
+import jwt as auth_jwt
+import requests
+import secrets
+import string
 
 from cryptography.fernet import Fernet
 from fastapi import Depends, HTTPException, Security, status
-from fastapi.security import APIKeyHeader, APIKeyQuery, OAuth2PasswordBearer
+from fastapi.security import APIKeyHeader, APIKeyQuery, OAuth2PasswordBearer, HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from loguru import logger
 from sqlmodel.ext.asyncio.session import AsyncSession
 from starlette.websockets import WebSocket
+from sqlalchemy.exc import IntegrityError
 
 from langflow.services.database.models.api_key.crud import check_key
 from langflow.services.database.models.user.crud import get_user_by_id, get_user_by_username, update_user_last_login_at
 from langflow.services.database.models.user.model import User, UserRead
 from langflow.services.deps import get_db_service, get_session, get_settings_service
 from langflow.services.settings.service import SettingsService
+from langflow.services.database.models.user import User, UserCreate, UserRead, UserUpdate
+from langflow.services.database.models.folder.utils import create_default_folder_if_it_doesnt_exist
 
 if TYPE_CHECKING:
     from langflow.services.database.models.api_key.model import ApiKey
@@ -29,8 +36,10 @@ API_KEY_NAME = "x-api-key"
 
 api_key_query = APIKeyQuery(name=API_KEY_NAME, scheme_name="API key query", auto_error=False)
 api_key_header = APIKeyHeader(name=API_KEY_NAME, scheme_name="API key header", auto_error=False)
+azure_token = HTTPBearer(scheme_name="Azure Bearer Token")
 
 MINIMUM_KEY_LENGTH = 32
+
 
 
 # Source: https://github.com/mrtolkien/fastapi_simple_security/blob/master/fastapi_simple_security/security_api_key.py
@@ -76,13 +85,20 @@ async def api_key_security(
 
 
 async def get_current_user(
-    token: Annotated[str, Security(oauth2_login)],
+    oauth2_token: Annotated[str, Security(oauth2_login)],
+    azure_credentials: Annotated[HTTPAuthorizationCredentials, Depends(azure_token)],
     query_param: Annotated[str, Security(api_key_query)],
     header_param: Annotated[str, Security(api_key_header)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> User:
-    if token:
-        return await get_current_user_by_jwt(token, db)
+    # Try OAuth2 token first
+    if oauth2_token:
+        return await get_current_user_by_jwt(oauth2_token, db)
+
+    # Try Azure Bearer token next
+    if azure_credentials:
+        return await get_current_user_by_jwt(azure_credentials.credentials, db)
+
     user = await api_key_security(query_param, header_param)
     if user:
         return user
@@ -385,3 +401,73 @@ def decrypt_api_key(encrypted_api_key: str, settings_service: SettingsService):
             logger.debug("Failed to decrypt API key")
             decrypted_key = fernet.decrypt(encrypted_api_key).decode()
     return decrypted_key
+
+
+def is_valid_organization(token: str):
+    """
+    Verifies if the organization ID in the provided JWT token matches the expected Azure tenant ID.
+    """
+    decoded_token = auth_jwt.decode(token, options={"verify_signature": False})
+    organization_id = decoded_token.get("tid")
+    expected_org_id = get_settings_service().auth_settings.AZURE_TENANT_ID
+    if organization_id == expected_org_id:
+        return True
+    else:
+        return False
+
+
+def generate_password(length=16):
+    characters = string.ascii_letters + string.digits + string.punctuation
+    return ''.join(secrets.choice(characters) for _ in range(length))
+
+
+def get_user_profile(access_token: str):
+    """
+    Retrieves the profile information of the authenticated user from Microsoft Graph API.
+    """
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    response = requests.get("https://graph.microsoft.com/v1.0/me", headers=headers)
+    if response.status_code == 200:
+        return response.json()  # User profile data
+    else:
+        return None
+
+
+async def add_user(username: str, password: str, session) -> User | None:
+    user = UserCreate(username=username, password=password)
+    new_user = User.model_validate(user, from_attributes=True)
+    try:
+        new_user.password = get_password_hash(user.password)
+        new_user.is_active = get_settings_service().auth_settings.NEW_USER_IS_ACTIVE
+        session.add(new_user)
+        await session.commit()
+        await session.refresh(new_user)
+        folder = await create_default_folder_if_it_doesnt_exist(session, new_user.id)
+        if not folder:
+            return None
+        return new_user
+    except IntegrityError as e:
+        await session.rollback()
+        return None
+
+
+async def authenticate_user_by_token(token: str, db: AsyncSession) -> User | None:
+    if not is_valid_organization(token):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid organization")
+    user_profile  = get_user_profile(token)
+    username = user_profile.get('mail', None) if user_profile is not None else None
+    if username is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid token")
+    user = await get_user_by_username(db, username)
+    if not user:
+        password = generate_password()
+        user = await add_user(username, password, db)
+        return user
+    if not user.is_active:
+        if not user.last_login_at:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Waiting for approval")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Inactive user")
+    return user

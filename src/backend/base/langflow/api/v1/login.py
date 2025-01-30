@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status, Header
 from fastapi.security import OAuth2PasswordRequestForm
 
 from langflow.api.utils import DbSession
@@ -16,6 +16,7 @@ from langflow.services.auth.utils import (
 from langflow.services.database.models.folder.utils import create_default_folder_if_it_doesnt_exist
 from langflow.services.database.models.user.crud import get_user_by_id
 from langflow.services.deps import get_settings_service, get_variable_service
+from langflow.services.auth.utils import authenticate_user_by_token
 
 router = APIRouter(tags=["Login"])
 
@@ -164,3 +165,76 @@ async def logout(response: Response):
     response.delete_cookie("access_token_lf")
     response.delete_cookie("apikey_tkn_lflw")
     return {"message": "Logout successful"}
+
+
+@router.post("/azure-login", response_model=Token)
+async def azure_login_to_get_access_token(
+    response: Response,
+    db: DbSession,
+    token: str = Header()
+):
+    """
+    Authenticate a user using an Azure token and generate access and refresh tokens.
+    This endpoint validates the provided Azure token, authenticates the user, and generates
+    access and refresh tokens. The tokens are set as HTTP-only cookies in the response.
+
+    Args:
+        response (Response): The FastAPI Response object used to set cookies.
+        db (DbSession): The database session for querying and updating user data.
+        token (str): The Azure token provided in the request header.
+
+    Returns:
+        Token: A dictionary containing the access token and refresh token.
+    """
+    auth_settings = get_settings_service().auth_settings
+    try:
+        user = await authenticate_user_by_token(token, db)
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+    if user:
+        tokens = await create_user_tokens(user_id=user.id, db=db, update_last_login=True)
+        response.set_cookie(
+            "refresh_token_lf",
+            tokens["refresh_token"],
+            httponly=auth_settings.REFRESH_HTTPONLY,
+            samesite=auth_settings.REFRESH_SAME_SITE,
+            secure=auth_settings.REFRESH_SECURE,
+            expires=auth_settings.REFRESH_TOKEN_EXPIRE_SECONDS,
+            domain=auth_settings.COOKIE_DOMAIN,
+        )
+        response.set_cookie(
+            "access_token_lf",
+            tokens["access_token"],
+            httponly=auth_settings.ACCESS_HTTPONLY,
+            samesite=auth_settings.ACCESS_SAME_SITE,
+            secure=auth_settings.ACCESS_SECURE,
+            expires=auth_settings.ACCESS_TOKEN_EXPIRE_SECONDS,
+            domain=auth_settings.COOKIE_DOMAIN,
+        )
+        response.set_cookie(
+            "apikey_tkn_lflw",
+            str(user.store_api_key),
+            httponly=auth_settings.ACCESS_HTTPONLY,
+            samesite=auth_settings.ACCESS_SAME_SITE,
+            secure=auth_settings.ACCESS_SECURE,
+            expires=None,  # Set to None to make it a session cookie
+            domain=auth_settings.COOKIE_DOMAIN,
+        )
+        await get_variable_service().initialize_user_variables(user.id, db)
+        # Create default folder for user if it doesn't exist
+        await create_default_folder_if_it_doesnt_exist(db, user.id)
+        return tokens
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Incorrect access token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+
