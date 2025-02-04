@@ -21,7 +21,9 @@ from langflow.api.utils import CurrentActiveUser, DbSession, cascade_delete_flow
 from langflow.api.v1.schemas import FlowListCreate
 from langflow.initial_setup.constants import STARTER_FOLDER_NAME
 from langflow.services.database.models.flow import Flow, FlowCreate, FlowRead, FlowUpdate
-from langflow.services.database.models.flow.model import FlowHeader
+from langflow.services.database.models.flow.model import FlowHeader,FlowReadReadOnlyFlag
+from langflow.services.database.models.flows_share.model import FlowShare
+
 from langflow.services.database.models.flow.utils import get_webhook_component_in_flow
 from langflow.services.database.models.folder.constants import DEFAULT_FOLDER_NAME
 from langflow.services.database.models.folder.model import Folder
@@ -139,10 +141,10 @@ async def create_flow(
         if isinstance(e, HTTPException):
             raise
         raise HTTPException(status_code=500, detail=str(e)) from e
-    return db_flow
+    return FlowRead(**db_flow.model_dump(), readonly=False)
 
 
-@router.get("/", response_model=list[FlowRead] | Page[FlowRead] | list[FlowHeader], status_code=200)
+@router.get("/", response_model=list[FlowReadReadOnlyFlag] | Page[FlowReadReadOnlyFlag] | list[FlowHeader], status_code=200)
 async def read_flows(
     *,
     current_user: CurrentActiveUser,
@@ -206,7 +208,13 @@ async def read_flows(
             stmt = stmt.where(Flow.is_component == True)  # noqa: E712
 
         if get_all:
-            flows = (await session.exec(stmt)).all()
+            user_flows = (await session.exec(stmt)).all()
+            stmt_share= select(Flow).join(FlowShare, FlowShare.flow_id == Flow.id).where(FlowShare.shared_with == current_user.id)
+            shared_flows = (await session.exec(stmt_share)).all()
+            flows = (
+                [FlowReadReadOnlyFlag(**user_flow.model_dump(), readonly=False) for user_flow in user_flows] +
+                [FlowReadReadOnlyFlag(**shared_flow.model_dump(), readonly=True) for shared_flow in shared_flows]
+            )
             flows = validate_is_component(flows)
             if components_only:
                 flows = [flow for flow in flows if flow.is_component]
@@ -217,8 +225,9 @@ async def read_flows(
             return flows
 
         stmt = stmt.where(Flow.folder_id == folder_id)
+      
         return await paginate(session, stmt, params=params)
-
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
