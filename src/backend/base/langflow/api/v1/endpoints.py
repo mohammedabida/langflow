@@ -21,7 +21,7 @@ from fastapi import (
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from sqlmodel import select
+from sqlmodel import and_, select
 
 from langflow.api.utils import CurrentActiveUser, DbSession, parse_value
 from langflow.api.v1.schemas import (
@@ -64,10 +64,12 @@ from langflow.services.deps import (
     get_settings_service,
     get_task_service,
     get_telemetry_service,
+    session_scope,
 )
 from langflow.services.settings.feature_flags import FEATURE_FLAGS
 from langflow.services.telemetry.schema import RunPayload
 from langflow.utils.version import get_version_info
+from langflow.services.database.models.flows_share.model import FlowShare
 
 if TYPE_CHECKING:
     from langflow.services.event_manager import EventManager
@@ -401,7 +403,7 @@ async def simplified_run_flow(
     return result
 
 
-@router.post("/run_tokken/{flow_id_or_name}", response_model_exclude_none=True)  
+@router.post("/run_user_id/{flow_id_or_name}", response_model_exclude_none=True)  
 async def simplified_run_flow(
     *,
     background_tasks: BackgroundTasks,
@@ -409,50 +411,70 @@ async def simplified_run_flow(
     input_request: SimplifiedAPIRequest | None = None,
     stream: bool = False,
     provided_user_id: UUID,
-    api_key_user: CurrentActiveUser,
+    current_user: CurrentActiveUser,
     ):
-    """Executes a specified flow by ID with support for streaming and telemetry.
+    """
+    Execute a flow with the specified ID or name with proper permission checks.
 
-    This endpoint executes a flow identified by ID or name, with options for streaming the response
-    and tracking execution metrics. It handles both streaming and non-streaming execution modes.
+    This endpoint allows users to run flows they own or have been shared with them.
+    It supports both streaming and non-streaming execution modes.
 
     Args:
-        background_tasks (BackgroundTasks): FastAPI background task manager
-        flow (FlowRead | None): The flow to execute, loaded via dependency
-        input_request (SimplifiedAPIRequest | None): Input parameters for the flow
-        stream (bool): Whether to stream the response
-        api_key_user (UserRead): Authenticated user from API key
-        request (Request): The incoming HTTP request
+        background_tasks (BackgroundTasks): FastAPI background tasks handler for telemetry logging
+        flow (FlowRead): The flow to execute, retrieved by ID or endpoint name
+        input_request (SimplifiedAPIRequest, optional): Input parameters for the flow execution
+        stream (bool, default=False): Whether to stream the flow execution results
+        provided_user_id (UUID): The user ID provided in the request
+        current_user (CurrentActiveUser): The authenticated user making the request
 
     Returns:
-        Union[StreamingResponse, RunResponse]: Either a streaming response for real-time results
-        or a RunResponse with the complete execution results
+        Union[StreamingResponse, Any]: If streaming is enabled, returns a StreamingResponse.
+        Otherwise returns the flow execution result.
 
     Raises:
-        HTTPException: For flow not found (404) or invalid input (400)
-        APIException: For internal execution errors (500)
+        HTTPException (403): 
+            - If provided_user_id doesn't match current_user.id
+            - If user doesn't have permission to run the flow
+        HTTPException (404): If the specified flow is not found
+        HTTPException (400): If the flow ID format is invalid or chat input is invalid
+        APIException (500): For general execution errors
 
-    Notes:
-        - Supports both streaming and non-streaming execution modes
-        - Tracks execution time and success/failure via telemetry
-        - Handles graceful client disconnection in streaming mode
-        - Provides detailed error handling with appropriate HTTP status codes
-        - In streaming mode, uses EventManager to handle events:
-            - "add_message": New messages during execution
-            - "token": Individual tokens during streaming
-            - "end": Final execution result
+    Permissions:
+        - User must be authenticated
+        - User must either own the flow or have it shared with them via FlowShare
+        - The provided_user_id must match the authenticated user's ID
     """
-    if provided_user_id != api_key_user.id:
+    if provided_user_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Provided user id does not match the authenticated user."
         )
-    if flow.user_id is not None and flow.user_id != api_key_user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to run this flow.")
+ 
+    async with session_scope() as session:
+        if flow is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Flow not found"
+            )
+        
+        if not current_user.is_superuser and flow.user_id != current_user.id:
+            stmt = select(FlowShare).where(
+                and_(
+                    FlowShare.flow_id == flow.id,
+                    FlowShare.shared_with == current_user.id
+                )
+            )
+
+            shared_flow = (await session.exec(stmt)).first()
+           
+            if shared_flow is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You do not have permission to run this flow."
+                )
+            
     telemetry_service = get_telemetry_service()
     input_request = input_request if input_request is not None else SimplifiedAPIRequest()
-    if flow is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flow not found")
     start_time = time.perf_counter()
 
     if stream:
@@ -463,7 +485,7 @@ async def simplified_run_flow(
             run_flow_generator(
                 flow=flow,
                 input_request=input_request,
-                api_key_user=api_key_user,
+                api_key_user=current_user,
                 event_manager=event_manager,
                 client_consumed_queue=asyncio_queue_client_consumed,
             )
@@ -484,7 +506,7 @@ async def simplified_run_flow(
             flow=flow,
             input_request=input_request,
             stream=stream,
-            api_key_user=api_key_user,
+            api_key_user=current_user,
         )
         end_time = time.perf_counter()
         background_tasks.add_task(
@@ -496,7 +518,7 @@ async def simplified_run_flow(
                 run_error_message="",
             ),
         )
-
+ 
     except ValueError as exc:
         background_tasks.add_task(
             telemetry_service.log_package_run,
@@ -508,7 +530,6 @@ async def simplified_run_flow(
             ),
         )
         if "badly formed hexadecimal UUID string" in str(exc):
-            # This means the Flow ID is not a valid UUID which means it can't find the flow
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         if "not found" in str(exc):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -526,7 +547,7 @@ async def simplified_run_flow(
             ),
         )
         raise APIException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, exception=exc, flow=flow) from exc
-
+ 
     return result
 
 
