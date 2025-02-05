@@ -21,7 +21,7 @@ from fastapi import (
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from sqlmodel import select
+from sqlmodel import and_, select
 
 from langflow.api.utils import CurrentActiveUser, DbSession, parse_value
 from langflow.api.v1.schemas import (
@@ -64,10 +64,12 @@ from langflow.services.deps import (
     get_settings_service,
     get_task_service,
     get_telemetry_service,
+    session_scope,
 )
 from langflow.services.settings.feature_flags import FEATURE_FLAGS
 from langflow.services.telemetry.schema import RunPayload
 from langflow.utils.version import get_version_info
+from langflow.services.database.models.flows_share.model import FlowShare
 
 if TYPE_CHECKING:
     from langflow.services.event_manager import EventManager
@@ -398,6 +400,154 @@ async def simplified_run_flow(
         )
         raise APIException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, exception=exc, flow=flow) from exc
 
+    return result
+
+
+@router.post("/run_user_id/{flow_id_or_name}", response_model_exclude_none=True)  
+async def simplified_run_flow(
+    *,
+    background_tasks: BackgroundTasks,
+    flow: Annotated[FlowRead | None, Depends(get_flow_by_id_or_endpoint_name)],
+    input_request: SimplifiedAPIRequest | None = None,
+    stream: bool = False,
+    provided_user_id: UUID,
+    current_user: CurrentActiveUser,
+    ):
+    """
+    Execute a flow with the specified ID or name with proper permission checks.
+
+    This endpoint allows users to run flows they own or have been shared with them.
+    It supports both streaming and non-streaming execution modes.
+
+    Args:
+        background_tasks (BackgroundTasks): FastAPI background tasks handler for telemetry logging
+        flow (FlowRead): The flow to execute, retrieved by ID or endpoint name
+        input_request (SimplifiedAPIRequest, optional): Input parameters for the flow execution
+        stream (bool, default=False): Whether to stream the flow execution results
+        provided_user_id (UUID): The user ID provided in the request
+        current_user (CurrentActiveUser): The authenticated user making the request
+
+    Returns:
+        Union[StreamingResponse, Any]: If streaming is enabled, returns a StreamingResponse.
+        Otherwise returns the flow execution result.
+
+    Raises:
+        HTTPException (403): 
+            - If provided_user_id doesn't match current_user.id
+            - If user doesn't have permission to run the flow
+        HTTPException (404): If the specified flow is not found
+        HTTPException (400): If the flow ID format is invalid or chat input is invalid
+        APIException (500): For general execution errors
+
+    Permissions:
+        - User must be authenticated
+        - User must either own the flow or have it shared with them via FlowShare
+        - The provided_user_id must match the authenticated user's ID
+    """
+    if provided_user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Provided user id does not match the authenticated user."
+        )
+ 
+    async with session_scope() as session:
+        if flow is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Flow not found"
+            )
+        
+        if not current_user.is_superuser and flow.user_id != current_user.id:
+            stmt = select(FlowShare).where(
+                and_(
+                    FlowShare.flow_id == flow.id,
+                    FlowShare.shared_with == current_user.id
+                )
+            )
+
+            shared_flow = (await session.exec(stmt)).first()
+           
+            if shared_flow is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You do not have permission to run this flow."
+                )
+            
+    telemetry_service = get_telemetry_service()
+    input_request = input_request if input_request is not None else SimplifiedAPIRequest()
+    start_time = time.perf_counter()
+
+    if stream:
+        asyncio_queue: asyncio.Queue = asyncio.Queue()
+        asyncio_queue_client_consumed: asyncio.Queue = asyncio.Queue()
+        event_manager = create_stream_tokens_event_manager(queue=asyncio_queue)
+        main_task = asyncio.create_task(
+            run_flow_generator(
+                flow=flow,
+                input_request=input_request,
+                api_key_user=current_user,
+                event_manager=event_manager,
+                client_consumed_queue=asyncio_queue_client_consumed,
+            )
+        )
+
+        async def on_disconnect() -> None:
+            logger.debug("Client disconnected, closing tasks")
+            main_task.cancel()
+
+        return StreamingResponse(
+            consume_and_yield(asyncio_queue, asyncio_queue_client_consumed),
+            background=on_disconnect,
+            media_type="text/event-stream",
+        )
+
+    try:
+        result = await simple_run_flow(
+            flow=flow,
+            input_request=input_request,
+            stream=stream,
+            api_key_user=current_user,
+        )
+        end_time = time.perf_counter()
+        background_tasks.add_task(
+            telemetry_service.log_package_run,
+            RunPayload(
+                run_is_webhook=False,
+                run_seconds=int(end_time - start_time),
+                run_success=True,
+                run_error_message="",
+            ),
+        )
+ 
+    except ValueError as exc:
+        background_tasks.add_task(
+            telemetry_service.log_package_run,
+            RunPayload(
+                run_is_webhook=False,
+                run_seconds=int(time.perf_counter() - start_time),
+                run_success=False,
+                run_error_message=str(exc),
+            ),
+        )
+        if "badly formed hexadecimal UUID string" in str(exc):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        if "not found" in str(exc):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise APIException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, exception=exc, flow=flow) from exc
+    except InvalidChatInputError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        background_tasks.add_task(
+            telemetry_service.log_package_run,
+            RunPayload(
+                run_is_webhook=False,
+                run_seconds=int(time.perf_counter() - start_time),
+                run_success=False,
+                run_error_message=str(exc),
+            ),
+        )
+        raise APIException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, exception=exc, flow=flow) from exc
+ 
     return result
 
 
