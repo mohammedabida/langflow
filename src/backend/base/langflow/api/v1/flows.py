@@ -22,6 +22,7 @@ from langflow.api.v1.schemas import FlowListCreate
 from langflow.initial_setup.constants import STARTER_FOLDER_NAME
 from langflow.services.database.models.flow import Flow, FlowCreate, FlowRead, FlowUpdate
 from langflow.services.database.models.flow.model import FlowHeader
+from langflow.services.database.models.flows_share.model import FlowShare
 from langflow.services.database.models.flow.utils import get_webhook_component_in_flow
 from langflow.services.database.models.folder.constants import DEFAULT_FOLDER_NAME
 from langflow.services.database.models.folder.model import Folder
@@ -240,6 +241,29 @@ async def _read_flow(
         )
     return (await session.exec(stmt)).first()
 
+async def _read_flow_authorized(
+    session: AsyncSession,
+    flow_id: UUID,
+    user_id: UUID,
+    settings_service: SettingsService,
+):
+    """Retrieve a flow only if the user is authorized (owner or shared access)."""
+    flow = await _read_flow(session, flow_id, user_id, settings_service)
+    if not flow:
+        raise HTTPException(status_code=404, detail="Flow not found")
+    # check if the user is the owner of the flow
+    if flow.user_id == user_id:
+        return flow
+    #check if the flow is shared with the user
+    stmt = select(FlowShare).where(
+        FlowShare.flow_id == flow_id,
+        FlowShare.shared_with == user_id  
+    )
+    result = await session.exec(stmt)
+    shared_access = result.first()
+    if shared_access:
+        return flow 
+    raise HTTPException(status_code=403, detail="Unauthorized Flow")
 
 @router.get("/{flow_id}", response_model=FlowRead, status_code=200)
 async def read_flow(
@@ -254,6 +278,22 @@ async def read_flow(
     raise HTTPException(status_code=404, detail="Flow not found")
 
 
+@router.get("/authorized/{flow_id}", response_model=FlowRead, status_code=200)
+async def read_flow_authorized(
+    *,
+    session: DbSession,
+    flow_id: UUID,
+    current_user: CurrentActiveUser,
+):
+    """Read a flow."""
+    try:
+        user_flow = await _read_flow_authorized(session, flow_id, current_user.id, get_settings_service())
+        return user_flow
+    except Exception as e :
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail="Something went wrong while retrieving authorized flow by id {flow_id}" )
+    
 @router.patch("/{flow_id}", response_model=FlowRead, status_code=200)
 async def update_flow(
     *,
