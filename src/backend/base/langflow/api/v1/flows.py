@@ -240,6 +240,22 @@ async def _read_flow(
         )
     return (await session.exec(stmt)).first()
 
+async def _read_flow_with_user_id(
+    session: AsyncSession,
+    flow_id: UUID,
+    user_id: UUID,
+):
+    """Read a flow & check for user ownership."""
+    
+    stmt = select(Flow).where(Flow.id == flow_id)
+    db_flow = (await session.exec(stmt)).first()
+    
+    if db_flow and db_flow.user_id != user_id:
+            raise HTTPException(status_code=404, detail="User Do not have access to this flow")
+        
+    return db_flow
+    
+
 
 @router.get("/{flow_id}", response_model=FlowRead, status_code=200)
 async def read_flow(
@@ -310,6 +326,36 @@ async def update_flow(
 
         if hasattr(e, "status_code"):
             raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return db_flow
+
+@router.patch("/{flow_id}/active", response_model=FlowRead, status_code=200)
+async def update_flow_to_active(
+    *,
+    session: DbSession,
+    flow_id: UUID,
+    current_user: CurrentActiveUser,
+):
+    """Update a flow to active state."""
+    try:
+        db_flow = await _read_flow_with_user_id(
+            session=session,
+            flow_id=flow_id,
+            user_id=current_user.id,
+        )
+
+        if not db_flow:
+            raise HTTPException(status_code=404, detail="Flow not found")
+
+        db_flow.published = False
+        db_flow.updated_at = datetime.now(timezone.utc)
+        
+        session.add(db_flow)
+        await session.commit()
+        await session.refresh(db_flow)
+        
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
     return db_flow

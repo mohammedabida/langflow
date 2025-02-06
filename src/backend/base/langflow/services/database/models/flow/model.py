@@ -44,7 +44,8 @@ class FlowBase(SQLModel):
     endpoint_name: str | None = Field(default=None, nullable=True, index=True)
     tags: list[str] | None = None
     locked: bool | None = Field(default=False, nullable=True)
-
+    published: bool | None = Field(default=True, nullable=True)
+    
     @field_validator("endpoint_name")
     @classmethod
     def validate_endpoint_name(cls, v):
