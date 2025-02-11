@@ -18,21 +18,20 @@ SDCP_TOKEN = os.getenv("SDCP_TOKEN")
 
 
 class AudioToTextComponent(Component):
-
     display_name = "Audio to Text Component"
-
     description = "Use this component to extract text from audio file."
-
     documentation: str = "http://docs.langflow.org/components/custom"
-
     icon = "notebook-pen"
-
     name = "AudioToTextComponent"
 
     inputs = [
 
-        FileInput(name="Audio_file_path", display_name="Audio File Path", file_types=["mp3"], required=True),
-
+        FileInput(
+            name="Audio_file_path",
+            display_name="Audio File Path",
+            info="Upload an audio file for transcription.",
+            file_types=["mp3", "m4a", "webm", "mp4", "mpga", "wav", "mpeg"], 
+            required=True),
     ]
 
     outputs = [
@@ -42,25 +41,23 @@ class AudioToTextComponent(Component):
     ]
 
     def build_output_data(self) -> Data:
-
         http = urllib3.PoolManager(retries=Retry(total=3, backoff_factor=0.2))
-
         url = f"{SDCP_ROOT_URL}audio_processor/audio_file_to_text/"
-
         headers = {'accept': 'application/json'}
         if SDCP_TOKEN:
             headers['apikey'] = SDCP_TOKEN
 
         with open(self.Audio_file_path, 'rb') as audio_file:
-
-            fields = {'audio_file': ('audio.mp3', audio_file.read(), 'audio/mpeg')}
-
-            response = http.request('POST', url, headers=headers, fields=fields)
+           file_extension = os.path.splitext(self.Audio_file_path)[1].lstrip(".")  
+           mime_type = f"audio/{file_extension}" if file_extension != "mp4" else "video/mp4"  
+        
+           fields = {
+            "audio_file": (f"audio.{file_extension}", audio_file.read(), mime_type),  
+           }
+           response = http.request("POST", url, headers=headers, fields=fields)
 
         response = json.loads(response.data.decode('utf-8'))
-
         data_obj = Data(value=response["result"])
-
         self.status = data_obj
 
         return data_obj
