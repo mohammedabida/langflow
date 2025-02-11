@@ -32,14 +32,14 @@ class ImageEmbeddingsComponent(Component):
             name= "image_files",
             display_name="Image Files",
             info="A list of image files to be processed.",
-            required=True,
+            required=False,
             file_types=["jpg","png","jpeg"],
         ),
         MessageTextInput(
             name="image_urls",
             display_name="Image Urls",
             info="A list of image URLs to be processed.",
-            required=True
+            required=False
         )
     ]
     
@@ -48,8 +48,17 @@ class ImageEmbeddingsComponent(Component):
     ]
     
     def build_output_data(self) -> Data:
-        files ={'image_files': open(self.image_files, 'rb')} 
+        if not self.image_files and not self.image_urls:
+            raise ValueError("Either 'image_files' or 'image_urls' must be provided.")
+        files = {}
         data={"gpt_model_name":self.gpt_model_name,"image_urls":[self.image_urls]}
+        
+        if self.image_files:
+            files["image_files"] = open(self.image_files, "rb") 
+
+        if self.image_urls:
+            data["image_urls"] = [self.image_urls]
+
         embedding_url = f"{SDCP_ROOT_URL}embedding/image_embeddings"
         if SDCP_TOKEN:
             headers = {"apikey": SDCP_TOKEN}
