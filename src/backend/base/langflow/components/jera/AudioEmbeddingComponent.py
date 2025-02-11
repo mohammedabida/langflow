@@ -23,14 +23,14 @@ class AudioEmbeddingComponent(Component):
         FileInput(
             name= "audio_file",
             display_name="Audio File",
-            info="An audio file to be processed.",
+            info="Upload an audio file to be processed.",
+            file_types=["mp3", "m4a", "webm", "mp4", "mpga", "wav", "mpeg"],
             required=True,
-            file_types=["mp3","wav"]
         ),
         IntInput(
             name="split_length",
             display_name="Split Length",
-            info="Split length in ms",
+            info="Split length in milliseconds.",
             value=60000
         )
     ]
@@ -40,8 +40,14 @@ class AudioEmbeddingComponent(Component):
     ]
     
     def build_output_data(self) -> Data:
-        files ={'audio_file': open(self.audio_file, 'rb')} 
-        data={"split_length":self.split_length}
+        with open(self.audio_file, "rb") as audio_file:
+            file_extension = os.path.splitext(self.audio_file)[1].lstrip(".")
+            mime_type = f"audio/{file_extension}" if file_extension != "mp4" else "video/mp4"  # MUDEI: Ajustei MIME type dinamicamente
+
+            files = {
+                "audio_file": (f"audio.{file_extension}", audio_file.read(), mime_type)  # MUDEI: Usando MIME correto
+            }
+            data = {"split_length": self.split_length}
         embedding_url=f"{SDCP_ROOT_URL}embedding/audio-embedding"
         if SDCP_TOKEN:
             headers = {"apikey": SDCP_TOKEN}

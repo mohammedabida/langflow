@@ -59,4 +59,4 @@ class SchemaGeneratorComponent(Component):
         return Data(value=json_schema)
         
     def build_output_message(self) -> Message:
-        return Message(text=self.build_output_data().value)
+        return Message(text=json.dumps(self.build_output_data().value, indent=2))

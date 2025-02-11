@@ -67,6 +67,9 @@ class QueryExpansionRewriteComponent(Component):
         return data_obj
         
     def build_output_message(self) -> Message:
-        return Message(text=self.build_output_data().value)
+        result = self.build_output_data().value
+        if isinstance(result, list):  
+            result = "\n".join(result)
+        return Message(text=result)
  
  
