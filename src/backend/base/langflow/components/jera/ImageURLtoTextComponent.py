@@ -1,5 +1,5 @@
 from langflow.custom import Component
-from langflow.io import Output, MessageTextInput, MultilineInput
+from langflow.io import Output, DropdownInput, MultilineInput
 from langflow.schema import Data
 
 import json
@@ -29,7 +29,13 @@ class ImageURLtoTextComponent(Component):
             display_name="images URLs",
             info="comma seperated images URLs list",
         ),
-        MessageTextInput(name="gpt_model_name", display_name="gpt model name", info="write the openai GPT model"),
+        DropdownInput(
+            name= "gpt_model_name",
+            display_name="Gpt Model Name",
+            options=["gpt-4o","gpt-4o-mini","gpt-4-turbo"],
+            info="The GPT model name to use for processing.",
+            required=True
+        ),
         MultilineInput(
             name="prompt",
             display_name="Prompt to be passed to LLM",
