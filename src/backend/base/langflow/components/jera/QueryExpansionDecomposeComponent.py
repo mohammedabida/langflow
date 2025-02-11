@@ -67,6 +67,11 @@ class QueryExpansionDecomposeComponent(Component):
         return data_obj
         
     def build_output_message(self) -> Message:
-        return Message(text=self.build_output_data().value)
+        output_data = self.build_output_data().value
+    
+        if isinstance(output_data, list):  
+            output_data = "\n".join(output_data)  
+        
+        return Message(text=output_data) 
  
  

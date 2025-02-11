@@ -24,9 +24,9 @@ class TokenizerComponent(Component):
  
     inputs = [
         MultilineInput(
-            name="text",
-            display_name="your text",
-            info="the user text",
+            name="text_list",
+            display_name="Input Text",
+            info="Enter one or more sentences to tokenize",
         ),
         DropdownInput(name="tokenizer_method",
             display_name="tokenizer method",
@@ -65,6 +65,8 @@ class TokenizerComponent(Component):
         return data_obj
         
     def build_output_message(self) -> Message:
-        return Message(text=self.build_output_data().value)
+        tokens = self.build_output_data().value
+        text = ", ".join(tokens[0]) if tokens else ""
+        return Message(text=text)
  
  

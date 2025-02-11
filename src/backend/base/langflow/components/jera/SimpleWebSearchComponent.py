@@ -61,4 +61,6 @@ class SimpleWebSearchComponent(Component):
         return data_obj
         
     def build_output_message(self) -> Message:
-        return Message(text=self.build_output_data().value)
+        search_results = self.build_output_data().value
+        text = json.dumps(search_results, ensure_ascii=False, indent=4)
+        return Message(text=text)
